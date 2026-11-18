@@ -1,0 +1,71 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-c",
+              "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
+              "/ABSOLUTE/PATH/TO/memory-house/hooks/pillow_note.py"
+            ],
+            "timeout": 30,
+            "statusMessage": "Saving the pillow note"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-c",
+              "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
+              "/ABSOLUTE/PATH/TO/memory-house/hooks/after_compact.py"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-c",
+              "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
+              "/ABSOLUTE/PATH/TO/memory-house/hooks/shoulder_tap.py"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-c",
+              "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
+              "/ABSOLUTE/PATH/TO/memory-house/hooks/shoulder_tap.py"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

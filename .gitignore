@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.tmp
+# If you run Claude Code inside this folder, its house stays out of the repository.
+/memory/
