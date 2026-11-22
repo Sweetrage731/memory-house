@@ -8,7 +8,7 @@ License: MIT (see LICENSE).
 ## The problem
 
 Claude Code can only hold so much conversation at once. That limit is called the **context window**.
-When the window fills up, Claude Code runs a **compaction** (some people call it a smush). It replaces
+When the window fills up, Claude Code runs a **compaction** (some people call it a smush; once it stops being scary, a nap). It replaces
 the conversation with a summary and carries on from there.
 
 The summary is written by the model, in its own words. It paraphrases. Usually that's fine. Sometimes it
