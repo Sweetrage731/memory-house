@@ -25,6 +25,15 @@ MEMORY_HOUSE_CONTEXT_WINDOW to the same number so the marks line up.
 
 The marks: --taps or MEMORY_HOUSE_TAPS, default "70,80,88,93".
 
+More than one AI on this computer? Two optional checks keep the hook to its own AI's windows. A flag wins over
+its environment variable, and when a check can't tell (a new window with no reply yet, any error), the hook
+works as usual:
+  --model TEXT or MEMORY_HOUSE_MODEL           act only when the window's newest reply came from a model whose
+                                               id contains TEXT, in any case (for example opus)
+  --skip-dirs LIST or MEMORY_HOUSE_SKIP_DIRS   do nothing when the folder the window started in is one of these
+                                               folders or inside one; separate them with ;. The start folder is
+                                               $CLAUDE_PROJECT_DIR, or the hook's "cwd" when that isn't set
+
 It never blocks or slows anything: it gives up after one second, prints nothing on any error (it writes one
 line to <temp dir>/memory-house/errors.log instead), and exits 0.
 Proof that it runs: <temp dir>/memory-house[-<user id>]/shoulder-tap/heartbeat-<session>.txt is rewritten on
@@ -37,6 +46,7 @@ Try it by hand:
 import argparse
 import json
 import os
+import posixpath
 import re
 import sys
 import tempfile
@@ -44,6 +54,7 @@ import threading
 import time
 
 READ_LIMIT = 4 * 1024 * 1024       # the newest usage is near the end; 4 MB is plenty
+MODEL_READ_LIMIT = 2 * 1024 * 1024   # whose window is this: the newest reply is near the end; 2 MB is plenty
 DEADLINE = 1.0                     # seconds; after this the hook quits silently
 DEFAULT_TAPS = "70,80,88,93"
 RESET_DROP = 0.6                   # context fell below 60% of what it was at the last tap: start over
@@ -168,6 +179,89 @@ def latest_usage(path):
     return None, None
 
 
+# ---------- whose window is this? ----------
+
+def folder_key(path):
+    """A folder in a form that compares well: forward slashes, no trailing slash, lower case on Windows."""
+    text = os.path.expanduser(str(path or "").strip())
+    if not text:
+        return ""
+    text = posixpath.normpath(text.replace("\\", "/"))
+    return text.lower() if os.name == "nt" else text
+
+
+def in_skipped_folder(path, skip_dirs):
+    """True when path is one of the folders in skip_dirs (separated by ;) or inside one. A folder covers its
+    subfolders, never a neighbor whose name only starts the same ("Other" doesn't cover "Others").
+    No path, or any error: False."""
+    if not skip_dirs:
+        return False
+    try:
+        here = folder_key(path)
+        for folder in str(skip_dirs).split(";"):
+            folder = folder_key(folder)
+            if here and folder and (here == folder or here.startswith(folder.rstrip("/") + "/")):
+                return True
+    except Exception:
+        log_error("whose-window check")
+    return False
+
+
+def window_model(path):
+    """The model id behind the newest reply in the main conversation, read from the end of the transcript,
+    or "" when there's no reply yet. Subagents' lines (they can run another model) and stand-ins such as
+    "<synthetic>" are passed over."""
+    with open(native(path), "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - MODEL_READ_LIMIT))
+        lines = f.read().split(b"\n")
+    if size > MODEL_READ_LIMIT:
+        lines = lines[1:]                     # the seek cut the first line in half
+    for raw in reversed(lines):
+        if b'"assistant"' not in raw or b'"model"' not in raw:
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        model = str(message.get("model") or "").strip() if isinstance(message, dict) else ""
+        if model and not model.startswith("<"):
+            return model
+    return ""
+
+
+def runs_another_model(transcript, wanted):
+    """True when the newest reply came from a model whose id doesn't contain `wanted` (like "opus"), in any
+    case. Nothing wanted, no transcript, no reply yet, or any error: False."""
+    wanted = str(wanted or "").strip().lower()
+    if not wanted or not transcript:
+        return False
+    try:
+        model = window_model(transcript) if os.path.isfile(native(transcript)) else ""
+    except Exception:
+        log_error("whose-window check")
+        return False
+    return bool(model) and wanted not in model.lower()
+
+
+def someone_elses_window(hook, model=None, skip_dirs=None):
+    """True when this window belongs to another AI that shares the computer, so the hook must do nothing:
+    the folder the window started in is in --skip-dirs (or MEMORY_HOUSE_SKIP_DIRS), or --model (or
+    MEMORY_HOUSE_MODEL) is set and the newest reply came from a different model. The start folder is
+    $CLAUDE_PROJECT_DIR, which Claude Code sets for hooks and which stays put when the window cds somewhere
+    else; only without it, the hook's "cwd". Whenever it can't tell, it says False and the hook works as
+    usual: a broken check must never cost the owner a note."""
+    started_in = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip() or hook.get("cwd")
+    return (in_skipped_folder(started_in, skip_dirs or os.environ.get("MEMORY_HOUSE_SKIP_DIRS"))
+            or runs_another_model(hook.get("transcript_path"), model or os.environ.get("MEMORY_HOUSE_MODEL")))
+
+
+# ---------- the taps ----------
+
 def taps_from(text):
     marks = sorted({int(x) for x in re.findall(r"\d+", str(text or "")) if 0 < int(x) < 100})
     return marks or [int(x) for x in DEFAULT_TAPS.split(",")]
@@ -192,6 +286,10 @@ def options(argv=None):
     parser = argparse.ArgumentParser(description="Shoulder tap (Claude Code PostToolUse / UserPromptSubmit hook)")
     parser.add_argument("--window", help="context window in tokens, e.g. 200000, 200k or 1M")
     parser.add_argument("--taps", help='the marks in percent, e.g. "70,80,88,93"')
+    parser.add_argument("--model", help="act only in windows whose newest reply came from a model with this in "
+                                        "its id, e.g. opus (or set MEMORY_HOUSE_MODEL)")
+    parser.add_argument("--skip-dirs", help="other AIs' folders, separated by ;: do nothing in windows started "
+                                            "in them (or set MEMORY_HOUSE_SKIP_DIRS)")
     return parser.parse_known_args(argv)[0]   # unknown options are ignored, never fatal
 
 
@@ -210,6 +308,8 @@ def main():
     path = hook.get("transcript_path") or ""
     if not path or not os.path.isfile(native(path)):
         return
+    if someone_elses_window(hook, opts.model, opts.skip_dirs):
+        return                                # another AI's window on this computer: its own hooks look after it
     tokens, model = latest_usage(path)
     if tokens is None:
         return

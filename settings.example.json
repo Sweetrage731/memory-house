@@ -7,6 +7,7 @@
             "type": "command",
             "command": "python3",
             "args": [
+              "-I",
               "-c",
               "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
               "/ABSOLUTE/PATH/TO/memory-house/hooks/pillow_note.py"
@@ -25,6 +26,7 @@
             "type": "command",
             "command": "python3",
             "args": [
+              "-I",
               "-c",
               "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
               "/ABSOLUTE/PATH/TO/memory-house/hooks/after_compact.py"
@@ -42,6 +44,7 @@
             "type": "command",
             "command": "python3",
             "args": [
+              "-I",
               "-c",
               "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
               "/ABSOLUTE/PATH/TO/memory-house/hooks/shoulder_tap.py"
@@ -58,6 +61,7 @@
             "type": "command",
             "command": "python3",
             "args": [
+              "-I",
               "-c",
               "import os,runpy,sys;sys.argv=sys.argv[1:];os.path.isfile(sys.argv[0]) and runpy.run_path(sys.argv[0],run_name='__main__')",
               "/ABSOLUTE/PATH/TO/memory-house/hooks/shoulder_tap.py"

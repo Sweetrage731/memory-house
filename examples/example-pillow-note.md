@@ -6,7 +6,7 @@ Conversation: Header screenshot tests
 
 Everything below was copied from the transcript as it was. Nothing in it is summarized.
 After the compaction: read this first, compare it with the summary, put back anything missing or
-warped, and tell the user in one line whether anything was lost.
+warped, and tell the user in one line whether anything is missing from your notes.
 
 ## The user's last messages, word for word (oldest first)
 

@@ -42,4 +42,4 @@ I pack: I save new notes, add a dated library entry for what happened and what i
    the summary made something temporary permanent, or missed the message that lifted it, the user's
    words win.
 3. I put back anything missing: open tasks, promises, decisions, file paths.
-4. I tell the user in one line whether anything was lost or corrected.
+4. I tell the user in one line whether anything is missing from my notes or got corrected.

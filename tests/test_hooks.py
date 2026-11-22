@@ -36,6 +36,7 @@ def load(path, name):
 settings_tool = load(os.path.join(TOOLS, "print_settings.py"), "print_settings")
 pillow = load(os.path.join(HOOKS, "pillow_note.py"), "pillow_note_under_test")
 tap = load(os.path.join(HOOKS, "shoulder_tap.py"), "shoulder_tap_under_test")
+wake = load(os.path.join(HOOKS, "after_compact.py"), "after_compact_under_test")
 
 
 # ---------- a fake transcript, shaped like the real ones ----------
@@ -194,7 +195,7 @@ class Base(unittest.TestCase):
 
     def run_hook(self, script, payload, flags=(), env=None, raw=None):
         """Run a hook through the same guard line that print_settings.py writes into settings.json."""
-        cmd = [sys.executable, "-c", settings_tool.GUARD, os.path.join(HOOKS, script)] + list(flags)
+        cmd = [sys.executable, "-I", "-c", settings_tool.GUARD, os.path.join(HOOKS, script)] + list(flags)
         data = raw if raw is not None else json.dumps(payload).encode("utf-8")
         p = subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
                            env=env or self.env())
@@ -578,6 +579,258 @@ class ShoulderTap(Base):
         self.assertEqual(tap.taps_from("93, 70,80"), [70, 80, 93])
 
 
+# ---------- more than one AI on one computer ----------
+
+HOOK_SCRIPTS = ("pillow_note.py", "after_compact.py", "shoulder_tap.py")
+OTHER_MODEL = "claude-sonnet-5"
+
+
+class WhoseWindow(Base):
+    """MEMORY_HOUSE_MODEL (--model) and MEMORY_HOUSE_SKIP_DIRS (--skip-dirs): when several AIs share a computer,
+    each one's hooks keep to its own windows. Whenever a check can't tell, the hook works as usual."""
+    FULL = {"input_tokens": 2, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 718900,
+            "output_tokens": 98}             # 720,000 tokens: 72% of a 1M window
+
+    def setUp(self):
+        super().setUp()
+        self.other = os.path.join(self.tmp, "Other AI")           # a folder that belongs to another AI
+
+    def window(self, model="claude-opus-5-5"):
+        """A transcript with one message and one reply at 72% full, so every hook has work to do."""
+        t = Transcript(self.transcript)
+        t.human("keep the header blue", 1)
+        t.say("Will do.", 2, usage=self.FULL, model=model)
+        return t
+
+    def run_all(self, env=None, flags=(), drop=(), scripts=HOOK_SCRIPTS, **extra):
+        """Run the hooks on this window from a clean start. Returns what each one printed."""
+        for old in glob.glob(os.path.join(self.tmp, "**", "pillow"), recursive=True):
+            shutil.rmtree(old, ignore_errors=True)      # no notes from earlier runs, wherever the house was
+        for old in glob.glob(os.path.join(self.temp_dir, "memory-house*", "shoulder-tap", "*")):
+            os.remove(old)                    # no memory of earlier taps, and no old heartbeat
+        payload = {"session_id": SID, "transcript_path": self.transcript, "cwd": self.project}
+        payload.update(extra)
+        for key in drop:
+            payload.pop(key)
+        events = {"pillow_note.py": {"hook_event_name": "PreCompact", "trigger": "auto"},
+                  "after_compact.py": {"hook_event_name": "SessionStart", "source": "compact"},
+                  "shoulder_tap.py": {"hook_event_name": "PostToolUse"}}
+        return {script: self.run_hook(script, dict(payload, **events[script]), flags=flags, env=env)
+                for script in scripts}
+
+    def assertActs(self, out):
+        for script, printed in out.items():
+            self.assertTrue(printed, "%s should have done its usual work" % script)
+        if "pillow_note.py" in out:
+            self.assertIn("Instructions for this summary", out["pillow_note.py"])
+        if "shoulder_tap.py" in out:
+            self.assertIn("about 72% full", out["shoulder_tap.py"])
+
+    def assertSilent(self, out):
+        self.assertEqual(out, {script: "" for script in out})
+        self.assertEqual(glob.glob(os.path.join(self.tmp, "**", "pillow-*.md"), recursive=True), [],
+                         "no pillow note from another AI's window")
+        self.assertEqual(glob.glob(os.path.join(self.temp_dir, "memory-house*", "shoulder-tap", "*")), [],
+                         "no heartbeat or tap memory either")
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "memory-house", "errors.log")),
+                         "quiet because it chose to be, not because it broke")
+
+    def test_nothing_changes_until_its_asked_for(self):
+        self.window(model=OTHER_MODEL)        # another model, started in a folder that could be skipped
+        env = self.env(CLAUDE_PROJECT_DIR=self.other)
+        self.assertActs(self.run_all(env=env, cwd=self.other))
+        self.assertEqual(len(self.notes(os.path.join(self.other, "memory"))), 1)
+        env = self.env(CLAUDE_PROJECT_DIR=self.other, MEMORY_HOUSE_MODEL="", MEMORY_HOUSE_SKIP_DIRS="")
+        self.assertActs(self.run_all(env=env, cwd=self.other, scripts=("shoulder_tap.py",)))
+
+    def test_the_owners_model_is_looked_after(self):
+        t = self.window()
+        t.say("No response requested.", 3, usage={"input_tokens": 0, "output_tokens": 0}, model="<synthetic>")
+        self.assertActs(self.run_all(env=self.env(MEMORY_HOUSE_MODEL="opus")))
+        self.assertEqual(len(self.notes()), 1)
+        self.assertActs(self.run_all(env=self.env(MEMORY_HOUSE_MODEL=" OPUS "), scripts=("shoulder_tap.py",)))
+
+    def test_another_model_means_another_ais_window(self):
+        self.window(model=OTHER_MODEL)
+        self.assertSilent(self.run_all(env=self.env(MEMORY_HOUSE_MODEL="opus")))
+
+    def test_a_helper_on_another_model_doesnt_count(self):
+        t = self.window()
+        t.say("a helper's reply", 3, model=OTHER_MODEL, isSidechain=True)
+        self.assertActs(self.run_all(env=self.env(MEMORY_HOUSE_MODEL="opus")))
+        t = self.window(model=OTHER_MODEL)
+        t.say("a helper's reply", 3, model="claude-opus-5-5", isSidechain=True)
+        self.assertSilent(self.run_all(env=self.env(MEMORY_HOUSE_MODEL="opus"), scripts=("shoulder_tap.py",)))
+
+    def test_a_new_window_works_as_usual(self):
+        t = Transcript(self.transcript)
+        t.human("the first message in a new window", 1)
+        out = self.run_all(env=self.env(MEMORY_HOUSE_MODEL="opus"), scripts=("pillow_note.py", "after_compact.py"))
+        self.assertActs(out)                  # (the shoulder tap has nothing to measure yet)
+        with open(self.notes()[0], encoding="utf-8") as f:
+            self.assertIn("> the first message in a new window", f.read())
+        t.say("a reply that names no model", 2, usage=self.FULL, model=None)
+        self.assertActs(self.run_all(env=self.env(MEMORY_HOUSE_MODEL="opus")))
+
+    def test_a_missing_transcript_works_as_usual(self):
+        env = self.env(MEMORY_HOUSE_MODEL="opus")
+        some = ("pillow_note.py", "after_compact.py")              # the shoulder tap needs a transcript anyway
+        self.assertActs(self.run_all(env=env, scripts=some, transcript_path=os.path.join(self.tmp, "gone.jsonl")))
+        self.assertActs(self.run_all(env=env, scripts=some, drop=("transcript_path",)))
+
+    def test_skip_dirs(self):
+        self.window()
+        skip = " %s ;; %s " % (os.path.join(self.tmp, "Third AI"), self.other)
+        for started_in in (self.other, os.path.join(self.other, "notes", "old")):
+            self.assertSilent(self.run_all(env=self.env(MEMORY_HOUSE_SKIP_DIRS=skip, CLAUDE_PROJECT_DIR=started_in)))
+        if os.name == "nt":                                         # Windows folder names ignore case
+            self.assertSilent(self.run_all(env=self.env(MEMORY_HOUSE_SKIP_DIRS=skip,
+                                                        CLAUDE_PROJECT_DIR=self.other.upper()),
+                                           scripts=("shoulder_tap.py",)))
+        self.assertActs(self.run_all(env=self.env(MEMORY_HOUSE_SKIP_DIRS=skip)))     # the owner's own folder
+
+    def test_the_folder_the_window_started_in_decides(self):
+        self.window()
+        inside = os.path.join(self.other, "notes")
+        # started in another AI's folder, then moved out with cd: still that AI's window
+        env = self.env(MEMORY_HOUSE_SKIP_DIRS=self.other, CLAUDE_PROJECT_DIR=inside)
+        self.assertSilent(self.run_all(env=env, cwd=self.project))
+        self.assertSilent(self.run_all(env=env, cwd=None, scripts=("shoulder_tap.py",)))
+        # the owner's window, visiting another AI's folder with cd: still the owner's
+        env = self.env(MEMORY_HOUSE_SKIP_DIRS=self.other)            # CLAUDE_PROJECT_DIR is the owner's
+        self.assertActs(self.run_all(env=env, cwd=inside))
+        self.assertEqual(len(self.notes()), 1, "and the note goes to the owner's house")
+
+    def test_without_a_project_dir_the_cwd_decides(self):
+        self.window()
+        for unset in (None, ""):
+            env = self.env(MEMORY_HOUSE_SKIP_DIRS=self.other, CLAUDE_PROJECT_DIR=unset)
+            self.assertSilent(self.run_all(env=env, cwd=os.path.join(self.other, "notes")))
+        self.assertActs(self.run_all(env=self.env(MEMORY_HOUSE_SKIP_DIRS=self.other, CLAUDE_PROJECT_DIR=None)))
+        self.assertEqual(len(self.notes()), 1, "the hook's cwd is the project then")
+
+    def test_no_folder_at_all_works_as_usual(self):
+        self.window()
+        house = ["--memory-dir", os.path.join(self.tmp, "house")]    # no project folder to keep it in either
+        env = self.env(MEMORY_HOUSE_SKIP_DIRS=self.other, CLAUDE_PROJECT_DIR=None)
+        self.assertActs(self.run_all(env=env, flags=house, cwd=None))
+        self.assertActs(self.run_all(env=env, flags=house, drop=("cwd",)))
+
+    def test_a_neighbor_whose_name_starts_the_same_is_not_skipped(self):
+        self.window()
+        for started_in in (self.other + " backup", self.other + "s", self.tmp):
+            env = self.env(MEMORY_HOUSE_SKIP_DIRS=self.other, CLAUDE_PROJECT_DIR=started_in)
+            self.assertActs(self.run_all(env=env, scripts=("shoulder_tap.py",)))
+
+    def test_forward_slashes_and_a_trailing_slash(self):
+        self.window()
+        forward = self.other.replace("\\", "/") + "/"
+        self.assertSilent(self.run_all(env=self.env(MEMORY_HOUSE_SKIP_DIRS=forward, CLAUDE_PROJECT_DIR=self.other)))
+        env = self.env(MEMORY_HOUSE_SKIP_DIRS=self.other + os.sep,
+                       CLAUDE_PROJECT_DIR=os.path.join(self.other, "notes").replace("\\", "/"))
+        self.assertSilent(self.run_all(env=env, scripts=("shoulder_tap.py",)))
+
+    def test_flags_work_too_and_win_over_the_variables(self):
+        self.window()
+        env = self.env(MEMORY_HOUSE_MODEL="sonnet")
+        self.assertSilent(self.run_all(env=env))                    # another AI's hooks, in this window
+        self.assertActs(self.run_all(env=env, flags=["--model", "opus"]))
+        self.assertSilent(self.run_all(flags=["--skip-dirs", self.project]))
+
+    def test_print_settings_writes_them_into_every_hook(self):
+        third = os.path.join(self.tmp, "Third AI")
+        code, out, err = self.run_tool("print_settings.py", ["--model", "opus", "--skip-dirs",
+                                                             " %s ; %s " % (self.other, third + os.sep)])
+        self.assertEqual(code, 0, err)
+        hooks = json.loads(out)["hooks"]
+        self.assertEqual(set(hooks), {"PreCompact", "SessionStart", "PostToolUse", "UserPromptSubmit"})
+        for event, groups in hooks.items():
+            self.assertEqual(groups[0]["hooks"][0]["args"][4:],
+                             ["--model", "opus", "--skip-dirs", self.other + ";" + third], event)
+        code, out, err = self.run_tool("print_settings.py", ["--memory-dir", self.tmp])
+        for event, groups in json.loads(out)["hooks"].items():
+            args = groups[0]["hooks"][0]["args"]
+            self.assertFalse({"--model", "--skip-dirs"} & set(args), event)
+
+    def test_the_folder_rules_in_every_hook(self):
+        other = r"C:\Users\you\Documents\OtherAI"
+        cases = [(other, other, True),
+                 (other + r"\notes\old", other, True),
+                 (other + "balls", other, False),                   # a neighbor whose name starts the same
+                 (r"C:\Users\you\Documents", other, False),         # the folder above
+                 ("C:/Users/you/Documents/OtherAI/notes", other + "\\", True),
+                 (other, "C:/Users/you/Documents/OtherAI//", True),
+                 (other, r" D:\Elsewhere ;; %s " % other, True),
+                 ("/home/you/other-ai/notes", "/home/you/other-ai/", True),
+                 ("/home/you/other-ai-2", "/home/you/other-ai", False),
+                 (os.path.join(os.path.expanduser("~"), "OtherAI", "notes"), "~/OtherAI", True),
+                 (r"\\server\share\OtherAI\notes", r"\\server\share\OtherAI", True),
+                 (r"c:\users\YOU\documents\otherai", other, os.name == "nt"),
+                 (None, other, False), ("", other, False), (42, other, False),
+                 (other, None, False), (other, "", False), (other, " ; ", False)]
+        for module in (pillow, wake, tap):
+            for cwd, skip_dirs, expected in cases:
+                self.assertEqual(module.in_skipped_folder(cwd, skip_dirs), expected,
+                                 (module.__name__, cwd, skip_dirs))
+
+    def test_which_model_a_window_runs(self):
+        for compact_json in (True, False):
+            t = Transcript(self.transcript, compact_json)
+            t.human("hi", 1)
+            for module in (pillow, wake, tap):
+                self.assertEqual(module.window_model(self.transcript), "", "no reply yet")
+            t.say("first", 2)                                       # claude-opus-5-5
+            t.say("second", 3, model=OTHER_MODEL)
+            t.say("a helper's reply", 4, model="claude-haiku-5-5", isSidechain=True)
+            t.say("No response requested.", 5, model="<synthetic>")
+            t.say("a reply that names no model", 6, model=None)
+            for module in (pillow, wake, tap):
+                self.assertEqual(module.window_model(self.transcript), OTHER_MODEL, module.__name__)
+                self.assertTrue(module.runs_another_model(self.transcript, "opus"))
+                self.assertFalse(module.runs_another_model(self.transcript, "SONNET"))
+                self.assertFalse(module.runs_another_model(self.transcript, ""))
+                self.assertFalse(module.runs_another_model(os.path.join(self.tmp, "gone.jsonl"), "opus"))
+
+    def test_reads_only_the_end_of_the_transcript(self):
+        t = Transcript(self.transcript)
+        t.say("the first line", 1)                                  # claude-opus-5-5
+        for module in (pillow, wake, tap):
+            self.assertEqual(module.window_model(self.transcript), "claude-opus-5-5",
+                             "a small file keeps its first line")
+        t.say("a newer reply", 2, model=OTHER_MODEL)
+        t.human("x" * 5000, 3)
+        for module in (pillow, wake, tap):
+            self.assertEqual(module.window_model(self.transcript), OTHER_MODEL)
+            old = module.MODEL_READ_LIMIT
+            try:
+                module.MODEL_READ_LIMIT = 4000                      # both replies are further back than that
+                self.assertEqual(module.window_model(self.transcript), "")
+                self.assertFalse(module.runs_another_model(self.transcript, "opus"), "can't tell: carry on")
+            finally:
+                module.MODEL_READ_LIMIT = old
+
+    def test_a_check_that_breaks_never_costs_a_note(self):
+        self.window()
+
+        def broken(*args):
+            raise OSError("the transcript is locked")
+
+        class Unprintable:
+            def __str__(self):
+                raise ValueError("no")
+
+        for module in (pillow, wake, tap):
+            logged = []
+            saved = module.window_model, module.log_error
+            module.window_model, module.log_error = broken, logged.append
+            try:
+                self.assertFalse(module.runs_another_model(self.transcript, "sonnet"))
+                self.assertFalse(module.in_skipped_folder(self.project, Unprintable()))
+            finally:
+                module.window_model, module.log_error = saved
+            self.assertEqual(logged, ["whose-window check"] * 2, module.__name__)
+
+
 # ---------- the tools ----------
 
 class Tools(Base):
@@ -648,19 +901,34 @@ class Tools(Base):
         self.assertEqual(set(hooks), {"PreCompact", "SessionStart", "PostToolUse", "UserPromptSubmit"})
         self.assertEqual(hooks["SessionStart"][0]["matcher"], "compact")
         entry = hooks["PreCompact"][0]["hooks"][0]
-        self.assertTrue(os.path.isfile(entry["args"][2]))
+        self.assertEqual(entry["args"][:3], ["-I", "-c", settings_tool.GUARD])
+        self.assertTrue(os.path.isfile(entry["args"][3]))
         build_main(self.transcript)
         p = subprocess.run([entry["command"]] + entry["args"], input=json.dumps(self.precompact()).encode(),
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env(), timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(len(self.notes()), 1)
-        wrong = [entry["command"], "-c", settings_tool.GUARD, os.path.join(self.tmp, "no", "such", "hook.py")]
+        wrong = [entry["command"]] + entry["args"][:3] + [os.path.join(self.tmp, "no", "such", "hook.py")]
         p = subprocess.run(wrong, input=b"{}", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual((p.returncode, p.stdout), (0, b""), "a wrong path must do nothing, never exit 2")
         code, out, err = self.run_tool("print_settings.py", ["--memory-dir", self.tmp, "--no-shoulder-tap"])
         hooks = json.loads(out)["hooks"]
         self.assertEqual(set(hooks), {"PreCompact", "SessionStart"})
         self.assertEqual(hooks["PreCompact"][0]["hooks"][0]["args"][-2:], ["--memory-dir", os.path.abspath(self.tmp)])
+
+    def test_the_projects_own_json_py_never_runs(self):
+        """Claude Code runs hooks inside the project folder. With -I, a file there named like one of Python's
+        own modules can't stand in for it."""
+        with open(os.path.join(self.project, "json.py"), "w", encoding="utf-8") as f:
+            f.write("raise SystemExit('the project json.py ran instead of the real one')\n")
+        build_main(self.transcript)
+        entry = settings_tool.block()["hooks"]["PreCompact"][0]["hooks"][0]
+        p = subprocess.run([entry["command"]] + entry["args"], input=json.dumps(self.precompact()).encode(),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env(), cwd=self.project,
+                           timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(b"Instructions for this summary", p.stdout)
+        self.assertEqual(len(self.notes()), 1)
 
     def test_settings_example_matches(self):
         with open(os.path.join(ROOT, "settings.example.json"), encoding="utf-8") as f:
@@ -671,8 +939,10 @@ class Tools(Base):
             want, have = printed[event][0], example[event][0]
             self.assertEqual(want.get("matcher"), have.get("matcher"), event)
             w, h = want["hooks"][0], have["hooks"][0]
-            self.assertEqual(h["args"][:2], ["-c", settings_tool.GUARD], event)
-            self.assertEqual(os.path.basename(h["args"][2]), os.path.basename(w["args"][2]), event)
+            self.assertEqual(w["args"][:3], ["-I", "-c", settings_tool.GUARD], event)
+            self.assertEqual(h["args"][:3], w["args"][:3], event)
+            self.assertEqual(len(h["args"]), len(w["args"]), event)
+            self.assertEqual(os.path.basename(h["args"][3]), os.path.basename(w["args"][3]), event)
             self.assertEqual((h["timeout"], h.get("statusMessage")), (w["timeout"], w.get("statusMessage")), event)
 
 

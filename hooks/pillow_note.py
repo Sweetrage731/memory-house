@@ -28,6 +28,15 @@ Other options:
   --keep N            how many pillow notes to keep (default 30; 0 keeps them all)
   --no-summary-hints  save the note, but print nothing for the summary
 
+More than one AI on this computer? Two optional checks keep the hook to its own AI's windows. A flag wins over
+its environment variable, and when a check can't tell (a new window with no reply yet, a missing transcript,
+any error), the hook works as usual:
+  --model TEXT or MEMORY_HOUSE_MODEL           act only when the window's newest reply came from a model whose
+                                               id contains TEXT, in any case (for example opus)
+  --skip-dirs LIST or MEMORY_HOUSE_SKIP_DIRS   do nothing when the folder the window started in is one of these
+                                               folders or inside one; separate them with ;. The start folder is
+                                               $CLAUDE_PROJECT_DIR, or the hook's "cwd" when that isn't set
+
 It never blocks a compaction. On any error it writes one line to <temp dir>/memory-house/errors.log and exits 0.
 Standard library only. Python 3.8 or newer, on Windows, macOS or Linux.
 
@@ -39,12 +48,14 @@ import argparse
 import datetime as dt
 import json
 import os
+import posixpath
 import re
 import sys
 import tempfile
 import time
 
 READ_LIMIT = 64 * 1024 * 1024    # read at most the last 64 MB of the transcript
+MODEL_READ_LIMIT = 2 * 1024 * 1024   # whose window is this: the newest reply is near the end; 2 MB is plenty
 MESSAGE_LIMIT = 4000             # characters per user message; a longer one is cut, and the cut is marked
 CLOSING_LIMIT = 1500             # characters per closing message from Claude
 CLOSINGS_KEPT = 4
@@ -159,6 +170,87 @@ def cut(text, limit):
 def quote(text):
     """The text as a Markdown block quote, line by line, unchanged."""
     return "\n".join("> " + line if line.strip() else ">" for line in text.split("\n"))
+
+
+# ---------- whose window is this? ----------
+
+def folder_key(path):
+    """A folder in a form that compares well: forward slashes, no trailing slash, lower case on Windows."""
+    text = os.path.expanduser(str(path or "").strip())
+    if not text:
+        return ""
+    text = posixpath.normpath(text.replace("\\", "/"))
+    return text.lower() if os.name == "nt" else text
+
+
+def in_skipped_folder(path, skip_dirs):
+    """True when path is one of the folders in skip_dirs (separated by ;) or inside one. A folder covers its
+    subfolders, never a neighbor whose name only starts the same ("Other" doesn't cover "Others").
+    No path, or any error: False."""
+    if not skip_dirs:
+        return False
+    try:
+        here = folder_key(path)
+        for folder in str(skip_dirs).split(";"):
+            folder = folder_key(folder)
+            if here and folder and (here == folder or here.startswith(folder.rstrip("/") + "/")):
+                return True
+    except Exception:
+        log_error("whose-window check")
+    return False
+
+
+def window_model(path):
+    """The model id behind the newest reply in the main conversation, read from the end of the transcript,
+    or "" when there's no reply yet. Subagents' lines (they can run another model) and stand-ins such as
+    "<synthetic>" are passed over."""
+    with open(native(path), "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - MODEL_READ_LIMIT))
+        lines = f.read().split(b"\n")
+    if size > MODEL_READ_LIMIT:
+        lines = lines[1:]                     # the seek cut the first line in half
+    for raw in reversed(lines):
+        if b'"assistant"' not in raw or b'"model"' not in raw:
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        model = str(message.get("model") or "").strip() if isinstance(message, dict) else ""
+        if model and not model.startswith("<"):
+            return model
+    return ""
+
+
+def runs_another_model(transcript, wanted):
+    """True when the newest reply came from a model whose id doesn't contain `wanted` (like "opus"), in any
+    case. Nothing wanted, no transcript, no reply yet, or any error: False."""
+    wanted = str(wanted or "").strip().lower()
+    if not wanted or not transcript:
+        return False
+    try:
+        model = window_model(transcript) if os.path.isfile(native(transcript)) else ""
+    except Exception:
+        log_error("whose-window check")
+        return False
+    return bool(model) and wanted not in model.lower()
+
+
+def someone_elses_window(hook, model=None, skip_dirs=None):
+    """True when this window belongs to another AI that shares the computer, so the hook must do nothing:
+    the folder the window started in is in --skip-dirs (or MEMORY_HOUSE_SKIP_DIRS), or --model (or
+    MEMORY_HOUSE_MODEL) is set and the newest reply came from a different model. The start folder is
+    $CLAUDE_PROJECT_DIR, which Claude Code sets for hooks and which stays put when the window cds somewhere
+    else; only without it, the hook's "cwd". Whenever it can't tell, it says False and the hook works as
+    usual: a broken check must never cost the owner a note."""
+    started_in = (os.environ.get("CLAUDE_PROJECT_DIR") or "").strip() or hook.get("cwd")
+    return (in_skipped_folder(started_in, skip_dirs or os.environ.get("MEMORY_HOUSE_SKIP_DIRS"))
+            or runs_another_model(hook.get("transcript_path"), model or os.environ.get("MEMORY_HOUSE_MODEL")))
 
 
 # ---------- whose words are these? ----------
@@ -471,7 +563,7 @@ def note_text(hook, got, now, count):
     w += ["",
           "Everything below was copied from the transcript as it was. Nothing in it is summarized.",
           "After the compaction: read this first, compare it with the summary, put back anything missing or",
-          "warped, and tell the user in one line whether anything was lost.",
+          "warped, and tell the user in one line whether anything is missing from your notes.",
           "", "## The user's last messages, word for word (oldest first)", ""]
     if dropped > 0:
         w += ["(%d earlier message%s since the last compaction %s in the transcript.)" % (
@@ -584,6 +676,10 @@ def options(argv=None):
     parser.add_argument("--messages", type=int, default=30, help="how many of the user's messages to copy")
     parser.add_argument("--keep", type=int, default=30, help="how many pillow notes to keep (0 keeps all)")
     parser.add_argument("--no-summary-hints", action="store_true", help="print nothing for the summary")
+    parser.add_argument("--model", help="act only in windows whose newest reply came from a model with this in "
+                                        "its id, e.g. opus (or set MEMORY_HOUSE_MODEL)")
+    parser.add_argument("--skip-dirs", help="other AIs' folders, separated by ;: do nothing in windows started "
+                                            "in them (or set MEMORY_HOUSE_SKIP_DIRS)")
     return parser.parse_known_args(argv)[0]   # unknown options are ignored, never fatal
 
 
@@ -597,6 +693,8 @@ def main():
         return
     if hook.get("hook_event_name") not in (None, "PreCompact") or hook.get("agent_id"):
         return                                # wrong event, or a subagent compacting its own context
+    if someone_elses_window(hook, opts.model, opts.skip_dirs):
+        return                                # another AI's window on this computer: its own hooks look after it
     note = None
     try:
         note = save(hook, opts)
