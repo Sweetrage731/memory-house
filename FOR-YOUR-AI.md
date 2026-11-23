@@ -16,7 +16,8 @@ come back as "NEVER USE THE GPU". The memory house prevents that:
 3. **Notes**: `memory/notes/*.md`, one fact per file, each with a date, a source and the user's exact words.
 4. **A library**: `memory/library.md`, dated entries, added to and never erased.
 5. **The attic**: the transcripts Claude Code keeps in `~/.claude/projects/<project>/`, searchable with
-   `tools/attic_search.py`.
+   `tools/attic_search.py`. If the person wants the conversation itself kept safe, see "Keeping the window
+   itself" in the README (`tools/window_words.py` for the words; a private repository only, never a public one).
 6. **Four hooks**: the pillow note (PreCompact), the wake-up check (SessionStart, matcher `compact`) and
    the shoulder tap (PostToolUse and UserPromptSubmit).
 

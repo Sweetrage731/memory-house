@@ -101,6 +101,29 @@ python3 tools/attic_search.py "use the GPU again" --who user
 Claude Code deletes transcripts older than 30 days unless you tell it otherwise. To keep a longer
 attic, add this to `~/.claude/settings.json`: `"cleanupPeriodDays": 365` (or more).
 
+### Keeping the window itself
+
+The transcript is the conversation itself: every word, plus pictures and tool output, so it can grow to
+gigabytes. It lives on one computer, and if that computer dies, the conversation goes with it. Two copies
+cover it:
+
+- **The whole window, to another machine.** Every night, copy the transcript (`<session>.jsonl`) and its side
+  folder (`<session>/`) to another computer or a drive you own. On Windows a scheduled task can run
+  `robocopy`; on a Mac or Linux, `rsync` from cron. Keep a few nights, and delete an old night only after a good
+  new copy, so a bad copy never replaces the only good one.
+- **The words, to a private repository.** `tools/window_words.py` writes just the words (the user's messages,
+  including the ones sent while Claude was working, and Claude's replies) as one Markdown file per day, with
+  times. Anything that looks like a key, token or password is hidden. A month of daily use is a few megabytes,
+  and a finished day never changes, so git stores each day once. That one survives even if every computer in
+  the house is lost.
+
+```
+python3 tools/window_words.py ~/.claude/projects/<project>/<session>.jsonl ~/private-backup/window-words --user Sam
+```
+
+Both copies hold your conversations word for word. Keep them on your own machines and in a private
+repository, never in a public one.
+
 ### The pillow note
 
 `hooks/pillow_note.py` runs seconds before every compaction, whether automatic or by `/compact`. It
@@ -202,6 +225,7 @@ front door that says who it's for, hooks that know whose window they're in (`MEM
 | `hooks/shoulder_tap.py` | PostToolUse and UserPromptSubmit hook: the nudges at 70, 80, 88 and 93% full. |
 | `tools/print_settings.py` | Prints the hooks block with this computer's real paths filled in. |
 | `tools/attic_search.py` | Finds old messages in the transcripts (and your notes) by their words. |
+| `tools/window_words.py` | Writes one conversation's words, one file per day, for a private backup. Keys hidden. |
 | `tools/stale_check.py` | Lists notes that may be out of date (a passed check-by or end date). Only lists. |
 | `tools/count_compactions.py` | Counts the compactions in a transcript, so the number never has to be remembered. |
 | `examples/CLAUDE.template.md` | The front door. Becomes your project's `CLAUDE.md`. |
@@ -319,6 +343,8 @@ rather keep the house there, give that folder to the hooks with `--memory-dir`, 
 - Don't publish your memory folder. If you back it up with git, use a private repository.
 - Transcripts are plain text files in `~/.claude/projects/`. Anything that passed through Claude Code is
   in them, including file contents and command output.
+- `tools/window_words.py` writes your conversation word for word. Push its folder only to a private
+  repository.
 - Never keep passwords or keys in memory. If one slips in, delete it from the note and change the key.
 
 ## Troubleshooting

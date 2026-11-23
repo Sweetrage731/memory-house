@@ -868,6 +868,32 @@ class Tools(Base):
         code, out, err = self.run_tool("attic_search.py", ["header", "blue", "--project", self.project])
         self.assertIn("Also keep the header blue", out, out + err)
 
+    def test_window_words(self):
+        t = build_main(self.transcript)
+        t.human("my token is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 and the password: hunter22", 24)
+        folder = os.path.join(self.project, "window words")
+        code, out, err = self.run_tool("window_words.py", [self.transcript, folder, "--user", "Sam"])
+        self.assertEqual(code, 0, err)
+        files = sorted(glob.glob(os.path.join(folder, "*.md")))
+        self.assertTrue(files, out + err)
+        text = ""
+        for path in files:
+            with open(path, encoding="utf-8") as f:
+                text += f.read()
+        for kept in ("OLD MESSAGE from before the last compaction", "back off the GPU for a minute",
+                     "Also keep the header blue", "also, don't push to main", "café ☕ 日本語",
+                     "Done. The header is blue", "Sam, while Claude worked", "# Render pipeline cleanup, ",
+                     "[hidden]"):
+            self.assertIn(kept, text)
+        for gone in ("TOOL OUTPUT TEXT", "PEER TEXT", "PEER TURN TEXT", "BLOB TEXT", "SIDECHAIN TEXT",
+                     "TASK NOTE TEXT", "PLAIN TASK TEXT", "PLAIN SCHEDULER TEXT", "system-reminder",
+                     "No response requested", "ghp_", "hunter22", "This session is being continued",
+                     "Request interrupted", "/model"):
+            self.assertNotIn(gone, text)
+        self.assertEqual(text.count("render's done, you can use it again"), 1, "recorded twice, written once")
+        code, out, err = self.run_tool("window_words.py", [self.transcript, folder, "--user", "Sam"])
+        self.assertIn("; 0 day files written", out, "a day that didn't change is left alone")
+
     def test_stale_check(self):
         house = os.path.join(self.project, "memory")
         os.makedirs(os.path.join(house, "notes"))
